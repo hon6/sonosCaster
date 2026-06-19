@@ -1,0 +1,67 @@
+name: Build & Release
+
+# Trigger: pushing a tag like v0.2.0 (or v1.0.0-rc1 etc).
+# Workflow_dispatch also enabled so you can re-run a release from the Actions UI.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Matches the local dev setup (32-bit Python 3.9 — required by the
+      # miniaudio dep that soundcard pulls in transitively on Windows).
+      - name: Set up Python 3.9 (32-bit)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+          architecture: 'x86'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
+
+      # ffmpeg is launched as a subprocess so it doesn't need to be 32-bit;
+      # grabs a stable BtbN autobuild from GitHub releases.
+      - name: Download ffmpeg
+        shell: pwsh
+        run: |
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+          Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip
+          Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpeg_extracted
+          $exe = Get-ChildItem -Path ffmpeg_extracted -Filter ffmpeg.exe -Recurse | Select-Object -First 1
+          New-Item -ItemType Directory -Force -Path bundle | Out-Null
+          Copy-Item -Path $exe.FullName -Destination bundle\ffmpeg.exe
+          Write-Host "ffmpeg.exe size: $((Get-Item bundle\ffmpeg.exe).Length) bytes"
+
+      - name: Build .exe
+        run: python build.py
+
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          if (-not (Test-Path dist\SonosCaster.exe)) {
+            throw "build produced no exe at dist\SonosCaster.exe"
+          }
+          $size = [math]::Round((Get-Item dist\SonosCaster.exe).Length / 1MB, 1)
+          Write-Host "SonosCaster.exe = $size MB"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/SonosCaster.exe
+          generate_release_notes: true
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: false
