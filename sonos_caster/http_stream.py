@@ -75,7 +75,12 @@ def get_lan_ip(target_ip: str = "10.168.1.166", override: str = None) -> str:
     """Return the local IP Sonos should connect back to.
 
     Order of preference:
-      1. An explicit user override (set in settings) — wins always.
+      1. An explicit user override — but only if it's still a CURRENT local IP.
+         A stale override (DHCP reassigned the PC a different address since
+         the override was saved) is the #1 cause of "Sonos got Play but
+         never connected to us"; silently falling back to auto-pick beats
+         leaving the user wondering why audio is silent for no visible
+         reason.
       2. An address on the SAME /24 subnet as the Sonos. Hosts that run
          VMware/WSL/Tailscale have many NICs (169.254.x, 172.x, 100.x) and the
          naive routing trick can pick an unreachable one; matching the Sonos's
@@ -84,7 +89,16 @@ def get_lan_ip(target_ip: str = "10.168.1.166", override: str = None) -> str:
       4. Hostname resolution.
     """
     if override:
-        return override
+        all_local = _all_ipv4()
+        if override in all_local:
+            log.info("lan_ip: using configured override %s", override)
+            return override
+        log.warning(
+            "lan_ip: configured override %s is NOT one of the current "
+            "local IPs %s (DHCP probably reassigned this PC since the "
+            "override was saved). Falling back to auto-pick.",
+            override, all_local,
+        )
 
     # 2. Same-subnet match.
     try:
@@ -112,6 +126,13 @@ def get_lan_ip(target_ip: str = "10.168.1.166", override: str = None) -> str:
         return socket.gethostbyname(socket.gethostname())
     except Exception:
         return "127.0.0.1"
+
+
+def _auto_picked_log_wrapper(target_ip: str, override: str) -> str:
+    ip = get_lan_ip(target_ip=target_ip, override=override)
+    if not override or ip != override:
+        log.info("lan_ip: auto-picked %s (Sonos at %s)", ip, target_ip)
+    return ip
 
 
 class _Broadcaster:
@@ -201,7 +222,7 @@ class AudioHTTPServer:
         self._running = threading.Event()
         self._level_cb = None  # optional callback(float peak 0..1) for a VU meter
         self._connections = []  # remote IPs that GET'd the stream (diagnostics)
-        self.lan_ip = get_lan_ip(sonos_ip, override=lan_ip_override)
+        self.lan_ip = _auto_picked_log_wrapper(sonos_ip, lan_ip_override)
 
     def client_count(self) -> int:
         """How many clients (Sonos) are currently pulling the stream."""
