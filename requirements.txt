@@ -1,0 +1,18 @@
+# Sonos discovery + control (UPnP)
+soco>=0.30
+
+# System audio capture (WASAPI loopback on Windows)
+soundcard>=0.4.2
+
+# Numeric buffer handling for audio frames
+numpy>=1.24,<2.1
+
+# Anti-aliased UI rendering (capsule, switch, level meter, icons)
+Pillow>=10.0
+
+# Tkinter ships with CPython on Windows — no pip install needed.
+#
+# External requirement (not a pip package):
+#   ffmpeg must be on PATH for `python main.py` (dev runs),
+#   or bundle/ffmpeg.exe must exist before running build.py (for the .exe).
+#   Install on Windows:  winget install Gyan.FFmpeg

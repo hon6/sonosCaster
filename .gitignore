@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+
+# Virtualenv
+.venv/
+venv/
+env/
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+
+# Runtime / user-specific
+*.log
+sonos_caster_settings.json
+
+# Bundled binary deps — users download these themselves (see README).
+# bundle/ as a directory is tracked via .gitkeep; only its contents are ignored.
+bundle/*
+!bundle/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
