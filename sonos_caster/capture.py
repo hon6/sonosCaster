@@ -8,12 +8,15 @@ interleaved PCM.
 
 from __future__ import annotations
 
+import logging
 import threading
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 import numpy as np
 import soundcard as sc
+
+log = logging.getLogger("sonos_caster.capture")
 
 
 @dataclass
@@ -81,6 +84,12 @@ class LoopbackCapture:
         cfg = self.config
         silence = self._silence_block()
         consecutive_failures = 0
+        # Current effective blocksize — we'll halve it on repeated open-failures
+        # so a too-large request (e.g. 1024 on a card that only accepts 512)
+        # downgrades automatically instead of going completely silent.
+        active_bs = cfg.blocksize
+        log.info("capture loop starting (samplerate=%d, ch=%d, blocksize=%d, device=%r)",
+                 cfg.samplerate, cfg.channels, active_bs, cfg.device_name)
 
         # soundcard emits a noisy "data discontinuity in recording" warning on
         # any tiny timing hiccup; it is harmless and would otherwise flood the
@@ -123,21 +132,39 @@ class LoopbackCapture:
                 with loopback.recorder(
                     samplerate=cfg.samplerate,
                     channels=None,
-                    blocksize=cfg.blocksize,
+                    blocksize=active_bs,
                 ) as rec:
                     consecutive_failures = 0
+                    log.info("recorder opened on %r with blocksize=%d",
+                             speaker_name, active_bs)
                     while self._running.is_set():
-                        frames = rec.record(numframes=cfg.blocksize)
+                        frames = rec.record(numframes=active_bs)
                         pcm16 = self._float_to_int16(frames, cfg.channels)
                         if self._on_pcm is not None:
                             self._on_pcm(pcm16)
             except Exception as exc:
-                # Recorder died (likely an audio-session change). Keep the
-                # downstream stream alive with a little silence, then rebuild.
+                # Recorder died (likely an audio-session change OR the
+                # requested blocksize is unsupported by this device).
                 self._error = exc
                 consecutive_failures += 1
                 if not self._running.is_set():
                     break
+                # If failures pile up fast, the blocksize is probably the
+                # problem (audio-session changes are sporadic, not 5+ in a
+                # row). Halve it on every 5 consecutive failures down to a
+                # floor of 128.
+                if consecutive_failures % 5 == 0 and active_bs > 128:
+                    new_bs = max(128, active_bs // 2)
+                    log.warning(
+                        "%d consecutive recorder failures at blocksize=%d "
+                        "(%s); downgrading to %d",
+                        consecutive_failures, active_bs, exc, new_bs,
+                    )
+                    active_bs = new_bs
+                    silence = (b"\x00\x00" * cfg.channels) * active_bs
+                else:
+                    log.debug("recorder failure %d: %s",
+                              consecutive_failures, exc)
                 if self._on_pcm is not None:
                     # ~50ms of silence to bridge the gap.
                     for _ in range(8):
@@ -146,6 +173,7 @@ class LoopbackCapture:
                         self._on_pcm(silence)
                 # Brief backoff; give up only after many rapid failures.
                 if consecutive_failures > 200:
+                    log.error("capture giving up after 200 failures (last error: %s)", exc)
                     self._running.clear()
                     break
                 self._sleep(0.05)

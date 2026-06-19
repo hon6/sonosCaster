@@ -385,7 +385,7 @@ class CapsuleApp:
             codec=self.cfg.get("codec", "wav"),
             dim_local=self.cfg.get("dim_local", True),
             capture_config=CaptureConfig(
-                blocksize=int(self.cfg.get("blocksize", 1024)),
+                blocksize=int(self.cfg.get("blocksize", 512)),
                 device_name=self.cfg.get("audio_device"),
             ),
             lan_ip_override=self.cfg.get("lan_ip"),
@@ -1085,7 +1085,7 @@ class SettingsDialog(tk.Toplevel):
 
         tk.Label(frm, text="采集帧数 (越小越低延迟)", bg=_BG, fg=_TEXT).grid(
             row=3, column=0, sticky="w", pady=(8, 0))
-        self.bs_var = tk.IntVar(value=int(cfg.get("blocksize", 1024)))
+        self.bs_var = tk.IntVar(value=int(cfg.get("blocksize", 512)))
         ttk.Combobox(
             frm, textvariable=self.bs_var, state="readonly", width=6,
             values=[64, 128, 256, 512, 1024],
