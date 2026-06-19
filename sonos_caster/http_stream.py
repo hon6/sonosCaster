@@ -222,23 +222,42 @@ class AudioHTTPServer:
 
         cfg = self.capture_config
 
-        # RAW WAV mode: stream PCM after a hand-built 4GB-length WAV header (the
-        # swyh-rs trick) so Sonos accepts the endless stream. We pass the PCM
-        # through ffmpeg with adaptive resampling (aresample=async=1) which
-        # absorbs the small clock drift between the PC's audio clock and Sonos's
-        # playback clock. Without this, over several minutes the drift makes
-        # Sonos's buffer slowly over/underflow -> tremolo -> stutter -> silence
-        # (the "works for 5 min then dies" bug). ffmpeg outputs HEADERLESS PCM
-        # (-f s16le); we prepend our own valid WAV header in the HTTP handler.
+        # WAV mode: stream raw PCM after a hand-built 4GB-length WAV header
+        # (swyh-rs trick) so Sonos accepts the endless stream. The PCM is
+        # routed through a tiny ffmpeg subprocess that does ONLY drift-
+        # absorbing resampling (`aresample=async=1000`) — output is still
+        # raw s16le PCM at the source rate. The async value is intentionally
+        # lax: ffmpeg only inserts/drops samples when accumulated drift
+        # exceeds ~1 second, so audio stays bit-perfect during normal play
+        # but doesn't let PC-vs-Sonos clock difference build up over time
+        # (that drift was what made the meter slowly stutter, then escalate
+        # to silence + watchdog re-Play, over and over).
         if self.codec == "wav":
-            # Lowest-latency path: raw int16 PCM straight to clients after a
-            # 4GB-length WAV header (swyh-rs trick). No ffmpeg, no resampling
-            # (aresample made it stutter from the start). Long-run stability is
-            # handled OUTSIDE this class by a watchdog that re-issues Play to
-            # Sonos if the stream connection drops.
             self._wav_header = _wav_header(cfg.samplerate, cfg.channels, 16)
+            ffmpeg_path = find_ffmpeg()
+            self._ffmpeg = subprocess.Popen(
+                [
+                    ffmpeg_path, "-hide_banner", "-loglevel", "error",
+                    "-fflags", "nobuffer", "-flags", "low_delay",
+                    "-avioflags", "direct", "-max_delay", "0",
+                    "-f", "s16le", "-ar", str(cfg.samplerate),
+                    "-ac", str(cfg.channels), "-i", "pipe:0",
+                    "-af", "aresample=async=1000",
+                    "-f", "s16le", "-ar", str(cfg.samplerate),
+                    "-ac", str(cfg.channels),
+                    "-flush_packets", "1", "-avioflags", "direct",
+                    "pipe:1",
+                ],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, bufsize=0,
+                creationflags=_NO_WINDOW,
+            )
             self._capture = LoopbackCapture(cfg)
-            self._capture.start(on_pcm=self._feed_raw)
+            self._capture.start(on_pcm=self._feed_ffmpeg)
+            self._pump_thread = threading.Thread(
+                target=self._pump_raw, name="PCMPump", daemon=True
+            )
+            self._pump_thread.start()
             self._start_http()
             return
 
@@ -448,6 +467,25 @@ class AudioHTTPServer:
 
     def set_level_callback(self, cb) -> None:
         self._level_cb = cb
+
+    def _pump_raw(self) -> None:
+        """Drift-corrected WAV path: read s16le PCM out of ffmpeg, broadcast.
+
+        Frame-aligned chunks of ~256 stereo frames keep L/R aligned even if
+        a chunk is dropped under backpressure (~5.8 ms each at 44.1 kHz).
+        """
+        proc = self._ffmpeg
+        if proc is None or proc.stdout is None:
+            return
+        read_size = self.capture_config.channels * 2 * 256
+        try:
+            while self._running.is_set():
+                chunk = proc.stdout.read(read_size)
+                if not chunk:
+                    break
+                self._broadcaster.publish(chunk)
+        except Exception:
+            pass
 
     def _pump_mp3(self) -> None:
         proc = self._ffmpeg
