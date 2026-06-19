@@ -1,5 +1,7 @@
 # Sonos Caster
 
+**English** | [简体中文](README.zh.md) | [日本語](README.ja.md) | [한국어](README.ko.md)
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Forward Windows system audio to a Sonos speaker in real time.
@@ -147,16 +149,3 @@ need a different transport (low-latency BT transmitter, wired output).
 MIT — see [LICENSE](LICENSE).
 
 Copyright © 2026 MRHong.
-
----
-
-## 中文简介
-
-把 **Windows 电脑正在播放的声音**实时转发到 **Sonos 音箱**上播放。
-浮动胶囊式界面，点开关开始/停止，悬停展开看设备/音量/设置。
-
-- **延迟**：低延迟模式实测 **~0.2 秒**（看视频对口型、听音乐、休闲游戏可用）。
-- **原理**：WASAPI 回环抓取 → 本机 HTTP 音频流 → SoCo 命令 Sonos 播放 URL。
-- **不走 AirPlay**：现代 Sonos 是 AirPlay 2 强制加密，开源方案不可行；改走 UPnP 反而更稳。
-
-安装运行见上面 Install 段；详细使用流程见 `使用说明.txt`。
