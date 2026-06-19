@@ -306,9 +306,17 @@ class AudioHTTPServer:
 
     def _feed_raw(self, pcm: bytes) -> None:
         """Raw-WAV path: int16 PCM straight to the broadcaster (no ffmpeg)."""
+        peak = self._peak_level(pcm)
+        # Track recent peak so the monitor can warn if we're sending silence
+        # (e.g. wrong audio_device picked in settings — Sonos receives a
+        # perfectly-good WAV stream of zeros, no errors anywhere, but the
+        # user just hears silence and has no idea why).
+        prev_max = getattr(self, "_recent_peak", 0.0)
+        if peak > prev_max:
+            self._recent_peak = peak
         if self._level_cb is not None:
             try:
-                self._level_cb(self._peak_level(pcm))
+                self._level_cb(peak)
             except Exception:
                 pass
         self._broadcaster.publish(pcm)
@@ -464,7 +472,9 @@ class AudioHTTPServer:
 
     def _monitor_loop(self) -> None:
         last_drops = 0
-        log.info("monitor: streaming started (queue_max=%d)", self._broadcaster._MAX_QUEUE)
+        silent_windows = 0
+        log.info("monitor: streaming started (queue_max=%d, stream_url=%s, lan_ip=%s)",
+                 self._broadcaster._MAX_QUEUE, self.stream_url, self.lan_ip)
         while self._running.is_set():
             time.sleep(5)
             if not self._running.is_set():
@@ -476,10 +486,27 @@ class AudioHTTPServer:
                 delta = drops - last_drops
                 last_drops = drops
                 clients = self.client_count()
+                # Peak audio level seen in the last ~5 s. Reset for the next
+                # window so each line reports a fresh max.
+                peak = getattr(self, "_recent_peak", 0.0)
+                self._recent_peak = 0.0
+                if peak < 0.001:
+                    silent_windows += 1
+                else:
+                    silent_windows = 0
                 log.info(
-                    "depths=%s drops_5s=%d total_drops=%d clients=%d",
-                    depths, delta, drops, clients,
+                    "depths=%s drops_5s=%d total_drops=%d clients=%d peak_5s=%.4f",
+                    depths, delta, drops, clients, peak,
                 )
+                if silent_windows == 3:
+                    log.warning(
+                        "captured audio has been SILENT for ~15 s — the loopback "
+                        "is producing zero-amplitude frames. Likely cause: the "
+                        "configured audio_device in settings isn't where your "
+                        "PC is actually playing audio right now. Open settings "
+                        "and try '系统默认' (system default) or pick the device "
+                        "that's currently playing."
+                    )
             except Exception as e:
                 log.warning("monitor error: %s", e)
 
