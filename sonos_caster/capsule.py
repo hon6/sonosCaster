@@ -569,7 +569,26 @@ class CapsuleApp:
             span, inner_h, self._level_history,
             _LEVEL, _LEVEL_HOT, _LEVEL_DIM, _BG,
         )
-        self._level_img = ImageTk.PhotoImage(img)
+        # Reuse a single PhotoImage per (width, height) — `paste` updates the
+        # pixels of an existing Tk image without creating a new C-side image
+        # object. Avoids a slow PhotoImage allocate-then-GC churn that, over
+        # many minutes of 20 fps redraws, was holding the GIL longer than
+        # necessary and starving the audio thread (= one suspect for the
+        # gradually-worsening stutter).
+        cache = getattr(self, "_level_img_cache", None)
+        if cache is None:
+            cache = self._level_img_cache = {}
+        key = (span, inner_h)
+        if key not in cache:
+            cache[key] = ImageTk.PhotoImage(img)
+            # Bound cache so a rapidly-resizing pill (rare) can't grow it
+            # forever; current width gets re-created on next frame.
+            if len(cache) > 6:
+                cache.clear()
+                cache[key] = ImageTk.PhotoImage(img)
+        else:
+            cache[key].paste(img)
+        self._level_img = cache[key]
         c.create_image(int(x0), _PAD + 1, anchor="nw", image=self._level_img)
 
     # --- embedded ttk widgets for the expanded state -------------------

@@ -235,14 +235,24 @@ class AudioHTTPServer:
         if self.codec == "wav":
             self._wav_header = _wav_header(cfg.samplerate, cfg.channels, 16)
             ffmpeg_path = find_ffmpeg()
+            # `-use_wallclock_as_timestamps 1` is the critical flag: without
+            # it ffmpeg tags incoming PCM with PTS derived from the sample
+            # COUNT, so the aresample async filter sees zero drift (input
+            # and output are both "44100 samples/sec" by definition) and
+            # corrects nothing. With wallclock timestamps, the filter sees
+            # the REAL drift between WASAPI's capture clock and Sonos's
+            # consumption clock and nudges sample count accordingly. async
+            # tolerance 100 samples (~2.3 ms) lets it react quickly without
+            # being chatty in steady state.
             self._ffmpeg = subprocess.Popen(
                 [
                     ffmpeg_path, "-hide_banner", "-loglevel", "error",
                     "-fflags", "nobuffer", "-flags", "low_delay",
                     "-avioflags", "direct", "-max_delay", "0",
+                    "-use_wallclock_as_timestamps", "1",
                     "-f", "s16le", "-ar", str(cfg.samplerate),
                     "-ac", str(cfg.channels), "-i", "pipe:0",
-                    "-af", "aresample=async=1000",
+                    "-af", "aresample=async=100:first_pts=0",
                     "-f", "s16le", "-ar", str(cfg.samplerate),
                     "-ac", str(cfg.channels),
                     "-flush_packets", "1", "-avioflags", "direct",
