@@ -14,13 +14,17 @@ per-client queues, so reconnects / multiple Sonos zones all work.
 
 from __future__ import annotations
 
+import logging
 import socket
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from queue import Empty, Queue
 from typing import List, Optional
+
+log = logging.getLogger("sonos_caster.http_stream")
 
 from .capture import CaptureConfig, LoopbackCapture
 from .ffmpeg_util import find_ffmpeg
@@ -125,15 +129,18 @@ class _Broadcaster:
     rare and inaudible.
     """
 
-    # Broadcast buffer headroom. At blocksize=512 (~12ms/chunk) this is roughly
-    # 3 seconds — generous enough that a brief Sonos rebuffer / WiFi blip
-    # doesn't force us to drop a chunk (which is audible as a click). The queue
-    # only fills under real backpressure, so the typical extra latency is ~0.
-    _MAX_QUEUE = 256
+    # Broadcast buffer headroom. ~750 ms at blocksize=512 — small enough that
+    # if Sonos's pull stalls we drop ONE chunk per arrival (audible but
+    # recovers) instead of accumulating seconds of stale audio that then
+    # cascades into many drops in a row (which sounds like "escalating
+    # stutter"). The original code used this size; making it larger to
+    # tolerate jitter ended up MAKING the cascade worse.
+    _MAX_QUEUE = 64
 
     def __init__(self):
         self._clients: List[Queue] = []
         self._lock = threading.Lock()
+        self._drop_count = 0
 
     def client_count(self) -> int:
         with self._lock:
@@ -157,11 +164,11 @@ class _Broadcaster:
             try:
                 q.put_nowait(data)
             except Exception:
-                # Queue full: drop exactly one oldest chunk to make room. No
-                # aggressive flushing — keep the stream continuous.
+                # Queue full: drop exactly one oldest chunk to make room.
                 try:
                     q.get_nowait()
                     q.put_nowait(data)
+                    self._drop_count = getattr(self, "_drop_count", 0) + 1
                 except Exception:
                     pass
 
@@ -222,53 +229,19 @@ class AudioHTTPServer:
 
         cfg = self.capture_config
 
-        # WAV mode: stream raw PCM after a hand-built 4GB-length WAV header
-        # (swyh-rs trick) so Sonos accepts the endless stream. The PCM is
-        # routed through a tiny ffmpeg subprocess that does ONLY drift-
-        # absorbing resampling (`aresample=async=1000`) — output is still
-        # raw s16le PCM at the source rate. The async value is intentionally
-        # lax: ffmpeg only inserts/drops samples when accumulated drift
-        # exceeds ~1 second, so audio stays bit-perfect during normal play
-        # but doesn't let PC-vs-Sonos clock difference build up over time
-        # (that drift was what made the meter slowly stutter, then escalate
-        # to silence + watchdog re-Play, over and over).
+        # WAV mode: raw int16 PCM straight to clients after a 4GB-length WAV
+        # header (swyh-rs trick). Two previous attempts to insert an ffmpeg
+        # drift-absorbing pass didn't actually help — the raw s16le demuxer
+        # ignores -use_wallclock_as_timestamps, so the aresample async filter
+        # saw zero drift to correct. Better to keep the pipeline simple and
+        # add diagnostic logging so we can see WHAT is actually causing the
+        # stutter the user reports.
         if self.codec == "wav":
             self._wav_header = _wav_header(cfg.samplerate, cfg.channels, 16)
-            ffmpeg_path = find_ffmpeg()
-            # `-use_wallclock_as_timestamps 1` is the critical flag: without
-            # it ffmpeg tags incoming PCM with PTS derived from the sample
-            # COUNT, so the aresample async filter sees zero drift (input
-            # and output are both "44100 samples/sec" by definition) and
-            # corrects nothing. With wallclock timestamps, the filter sees
-            # the REAL drift between WASAPI's capture clock and Sonos's
-            # consumption clock and nudges sample count accordingly. async
-            # tolerance 100 samples (~2.3 ms) lets it react quickly without
-            # being chatty in steady state.
-            self._ffmpeg = subprocess.Popen(
-                [
-                    ffmpeg_path, "-hide_banner", "-loglevel", "error",
-                    "-fflags", "nobuffer", "-flags", "low_delay",
-                    "-avioflags", "direct", "-max_delay", "0",
-                    "-use_wallclock_as_timestamps", "1",
-                    "-f", "s16le", "-ar", str(cfg.samplerate),
-                    "-ac", str(cfg.channels), "-i", "pipe:0",
-                    "-af", "aresample=async=100:first_pts=0",
-                    "-f", "s16le", "-ar", str(cfg.samplerate),
-                    "-ac", str(cfg.channels),
-                    "-flush_packets", "1", "-avioflags", "direct",
-                    "pipe:1",
-                ],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL, bufsize=0,
-                creationflags=_NO_WINDOW,
-            )
             self._capture = LoopbackCapture(cfg)
-            self._capture.start(on_pcm=self._feed_ffmpeg)
-            self._pump_thread = threading.Thread(
-                target=self._pump_raw, name="PCMPump", daemon=True
-            )
-            self._pump_thread.start()
+            self._capture.start(on_pcm=self._feed_raw)
             self._start_http()
+            self._start_diagnostics()
             return
 
         # 1. ffmpeg: raw PCM in -> MP3/FLAC out (continuous).
@@ -478,24 +451,37 @@ class AudioHTTPServer:
     def set_level_callback(self, cb) -> None:
         self._level_cb = cb
 
-    def _pump_raw(self) -> None:
-        """Drift-corrected WAV path: read s16le PCM out of ffmpeg, broadcast.
-
-        Frame-aligned chunks of ~256 stereo frames keep L/R aligned even if
-        a chunk is dropped under backpressure (~5.8 ms each at 44.1 kHz).
+    def _start_diagnostics(self) -> None:
+        """Log queue depth + drop count every 5s. Lets us see, from a real
+        user's session log, whether stutter comes from (a) drops because the
+        producer outpaces Sonos (depth=64, drops climbing), (b) Sonos
+        stalling and reconnecting (depth bounces 0..64), or (c) something
+        upstream of the broadcaster entirely (depth stays low, drops=0).
         """
-        proc = self._ffmpeg
-        if proc is None or proc.stdout is None:
-            return
-        read_size = self.capture_config.channels * 2 * 256
-        try:
-            while self._running.is_set():
-                chunk = proc.stdout.read(read_size)
-                if not chunk:
-                    break
-                self._broadcaster.publish(chunk)
-        except Exception:
-            pass
+        threading.Thread(
+            target=self._monitor_loop, name="Monitor", daemon=True,
+        ).start()
+
+    def _monitor_loop(self) -> None:
+        last_drops = 0
+        log.info("monitor: streaming started (queue_max=%d)", self._broadcaster._MAX_QUEUE)
+        while self._running.is_set():
+            time.sleep(5)
+            if not self._running.is_set():
+                break
+            try:
+                with self._broadcaster._lock:
+                    depths = [q.qsize() for q in self._broadcaster._clients]
+                drops = getattr(self._broadcaster, "_drop_count", 0)
+                delta = drops - last_drops
+                last_drops = drops
+                clients = self.client_count()
+                log.info(
+                    "depths=%s drops_5s=%d total_drops=%d clients=%d",
+                    depths, delta, drops, clients,
+                )
+            except Exception as e:
+                log.warning("monitor error: %s", e)
 
     def _pump_mp3(self) -> None:
         proc = self._ffmpeg

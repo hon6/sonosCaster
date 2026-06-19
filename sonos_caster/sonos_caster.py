@@ -7,6 +7,7 @@ on the LAN and ask Sonos (over UPnP, via SoCo) to play that URL. Latency is
 
 from __future__ import annotations
 
+import logging
 import threading
 import time as _time
 from enum import Enum
@@ -16,6 +17,8 @@ import soco
 
 from .capture import CaptureConfig
 from .http_stream import AudioHTTPServer
+
+log = logging.getLogger("sonos_caster.cast")
 
 
 class CastState(Enum):
@@ -342,6 +345,10 @@ class SonosCaster:
                     # mid-stream for a couple seconds and would otherwise look
                     # like a disconnect.
                     if grace >= 5:
+                        log.warning(
+                            "watchdog: no client for ~10s, re-issuing Play "
+                            "(this is the 'restart' the user sees)"
+                        )
                         try:
                             self._set_state(CastState.PLAYING, "重新连接 Sonos…")
                             target = self._fresh_coordinator_safe()
@@ -350,7 +357,7 @@ class SonosCaster:
                                 self._zone = target
                                 self._replay_now()
                         except Exception:
-                            pass
+                            log.exception("watchdog re-Play failed")
                         grace = 0
                 else:
                     grace = 0

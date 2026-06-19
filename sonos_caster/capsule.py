@@ -385,7 +385,7 @@ class CapsuleApp:
             codec=self.cfg.get("codec", "wav"),
             dim_local=self.cfg.get("dim_local", True),
             capture_config=CaptureConfig(
-                blocksize=int(self.cfg.get("blocksize", 512)),
+                blocksize=int(self.cfg.get("blocksize", 1024)),
                 device_name=self.cfg.get("audio_device"),
             ),
             lan_ip_override=self.cfg.get("lan_ip"),
@@ -866,7 +866,10 @@ class CapsuleApp:
         # Redraw the level line while forwarding/expanded.
         if self._forwarding or self._cur_w >= _EXPANDED_W - 8:
             self._redraw()
-        self.root.after(50, self._tick_level)
+        # 100 ms (10 fps) — was 50 ms but at 20 fps the Tk Canvas redraw +
+        # PIL render combo measurably steals CPU from the audio capture
+        # thread, contributing to the under-a-minute stutter cascade.
+        self.root.after(100, self._tick_level)
 
     # ----- minimize to taskbar (reliable; no tray dependency) ----------
 
@@ -1082,7 +1085,7 @@ class SettingsDialog(tk.Toplevel):
 
         tk.Label(frm, text="采集帧数 (越小越低延迟)", bg=_BG, fg=_TEXT).grid(
             row=3, column=0, sticky="w", pady=(8, 0))
-        self.bs_var = tk.IntVar(value=int(cfg.get("blocksize", 512)))
+        self.bs_var = tk.IntVar(value=int(cfg.get("blocksize", 1024)))
         ttk.Combobox(
             frm, textvariable=self.bs_var, state="readonly", width=6,
             values=[64, 128, 256, 512, 1024],

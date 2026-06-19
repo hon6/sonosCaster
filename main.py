@@ -6,33 +6,37 @@ hover to expand for device / format / volume / settings.
 
 Run:  python main.py   (or double-click run.bat)
 
-Writes a startup log to sonos_caster.log for diagnosis (pythonw has no stdout).
+Writes a session log to sonos_caster.log (pythonw / the PyInstaller exe have
+no stdout, so this file is the only window into what's happening).
 """
 
+import logging
 import os
 import sys
-import traceback
 
 LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sonos_caster.log")
 
+# `filemode="w"` truncates the file at startup so each launch's log is
+# self-contained — exactly what you want when asked to share it for diagnosis.
+logging.basicConfig(
+    filename=LOG,
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    filemode="w",
+)
 
-def _log(msg: str) -> None:
-    try:
-        with open(LOG, "a", encoding="utf-8") as f:
-            f.write(msg + "\n")
-    except Exception:
-        pass
+logger = logging.getLogger("sonos_caster.main")
 
 
 def main() -> None:
-    _log("=== launch (capsule) ===")
+    logger.info("=== launch (capsule) ===")
     try:
         from sonos_caster.capsule import main as ui_main
-        _log("starting capsule UI")
+        logger.info("starting capsule UI")
         ui_main()
-        _log("UI closed")
+        logger.info("UI closed")
     except Exception:
-        _log("FATAL:\n" + traceback.format_exc())
+        logger.exception("FATAL")
         try:
             print("Fatal error — see sonos_caster.log", file=sys.stderr)
         except Exception:
@@ -41,8 +45,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    try:
-        open(LOG, "w", encoding="utf-8").close()
-    except Exception:
-        pass
     main()
